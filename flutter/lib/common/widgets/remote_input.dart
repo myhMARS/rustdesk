@@ -97,14 +97,21 @@ class _RawTouchGestureDetectorRegionState
   // a pinch keeps zooming/panning the canvas.
   bool _twoFingerGestureDecided = false;
   bool _twoFingerScrollActive = false;
-  Offset _twoFingerStartFocalPoint = Offset.zero;
-  double _twoFingerScrollIntegral = 0;
   int _twoFingerUpdateCount = 0;
+  int _twoFingerPostSettleFrames = 0;
+  double _twoFingerSpanScore = 0;
+  double _twoFingerMoveScore = 0;
+  double _twoFingerLastScale = 1;
+  Offset _twoFingerScrollRemainder = Offset.zero;
   // Ignore the first updates: fingers land asynchronously and the early
   // scale jitter can fake a pinch.
-  static const int _twoFingerSettleUpdates = 3;
-  static const double _twoFingerPinchScaleThreshold = 0.12;
-  static const double _twoFingerScrollMoveThreshold = 24.0;
+  static const int _twoFingerSettleUpdates = 5;
+  // Classification compares the accumulated span change (converted to an
+  // approximate pixel distance with an assumed two-finger span) against the
+  // accumulated focal point movement.
+  static const double _twoFingerSpanPx = 250.0;
+  static const double _twoFingerMinEvidence = 12.0;
+  static const double _twoFingerPinchDominance = 2.0;
   // Same sensitivity as the three-finger vertical scroll.
   static const double _twoFingerScrollDivisor = 4.0;
 
@@ -469,9 +476,12 @@ class _RawTouchGestureDetectorRegionState
     }
     _twoFingerGestureDecided = false;
     _twoFingerScrollActive = false;
-    _twoFingerScrollIntegral = 0;
     _twoFingerUpdateCount = 0;
-    _twoFingerStartFocalPoint = d.localFocalPoint;
+    _twoFingerPostSettleFrames = 0;
+    _twoFingerSpanScore = 0;
+    _twoFingerMoveScore = 0;
+    _twoFingerLastScale = 1;
+    _twoFingerScrollRemainder = Offset.zero;
     if (isSpecialHoldDragActive) {
       // Initialize the last focal point to calculate deltas manually.
       _lastSpecialHoldDragFocalPoint = d.focalPoint;
@@ -544,41 +554,56 @@ class _RawTouchGestureDetectorRegionState
 
   // On mobile, a parallel two-finger swipe scrolls the remote wheel, while a
   // pinch keeps zooming/panning the canvas. Updates are ignored until the
-  // fingers settle, then the first unambiguous change locks the gesture into
-  // one of the two modes; the canvas stays still until then. Returns true
+  // fingers settle; the gesture is then classified by comparing the
+  // accumulated span change against the accumulated focal movement, and the
+  // result stays locked. The canvas is kept still until then. Returns true
   // when the update is consumed (scroll, or still undecided) so the caller
   // skips the canvas updates.
   bool _handleTwoFingerScroll(ScaleUpdateDetails d) {
     if (widget.isCamera || ffi.ffiModel.isPeerAndroid) {
       return false;
     }
+    final incScale = d.scale / _twoFingerLastScale;
+    _twoFingerLastScale = d.scale;
     _twoFingerUpdateCount++;
     if (!_twoFingerGestureDecided) {
       if (_twoFingerUpdateCount <= _twoFingerSettleUpdates) {
-        return true;
+        return true; // fingers still landing
       }
-      if ((d.scale - 1).abs() > _twoFingerPinchScaleThreshold) {
-        _twoFingerGestureDecided = true; // pinch -> canvas zoom/pan
-        return false;
+      _twoFingerPostSettleFrames++;
+      _twoFingerSpanScore += (incScale - 1).abs();
+      _twoFingerMoveScore += d.focalPointDelta.distance;
+      final spanPx = _twoFingerSpanScore * _twoFingerSpanPx;
+      // A pinch must persist and clearly dominate the focal movement; a
+      // single noisy frame must not be enough to trigger the canvas zoom.
+      final isPinch = _twoFingerPostSettleFrames >= 2 &&
+          spanPx >= _twoFingerMinEvidence &&
+          spanPx > _twoFingerMoveScore * _twoFingerPinchDominance;
+      if (!isPinch && _twoFingerMoveScore < _twoFingerMinEvidence) {
+        return true; // not enough evidence yet: keep the canvas still
       }
-      final moved = (d.localFocalPoint - _twoFingerStartFocalPoint).distance;
-      if (moved > _twoFingerScrollMoveThreshold) {
-        _twoFingerGestureDecided = true;
-        _twoFingerScrollActive = true;
-      } else {
-        return true; // undecided: keep the canvas still
+      _twoFingerGestureDecided = true;
+      if (isPinch) {
+        return false; // pinch -> canvas zoom/pan
       }
+      _twoFingerScrollActive = true;
     }
     if (!_twoFingerScrollActive) {
       return false;
     }
-    _twoFingerScrollIntegral += d.focalPointDelta.dy / _twoFingerScrollDivisor;
-    if (_twoFingerScrollIntegral > 1) {
-      inputModel.scroll(1);
-      _twoFingerScrollIntegral = 0;
-    } else if (_twoFingerScrollIntegral < -1) {
-      inputModel.scroll(-1);
-      _twoFingerScrollIntegral = 0;
+    _twoFingerScrollRemainder += d.focalPointDelta;
+    final dx = _twoFingerScrollRemainder.dx;
+    final dy = _twoFingerScrollRemainder.dy;
+    if (dy.abs() >= dx.abs()) {
+      if (dy.abs() >= _twoFingerScrollDivisor) {
+        inputModel.scrollAxis(0, dy > 0 ? 1 : -1);
+        _twoFingerScrollRemainder = Offset(dx, 0);
+      }
+    } else {
+      if (dx.abs() >= _twoFingerScrollDivisor) {
+        inputModel.scrollAxis(dx > 0 ? 1 : -1, 0);
+        _twoFingerScrollRemainder = Offset(0, dy);
+      }
     }
     return true;
   }
