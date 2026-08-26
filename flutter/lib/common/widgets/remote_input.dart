@@ -93,6 +93,17 @@ class _RawTouchGestureDetectorRegionState
   double _mouseScrollIntegral = 0; // mouse scroll speed controller
   double _scale = 1;
 
+  // Mobile two-finger gesture: a parallel swipe scrolls the remote wheel,
+  // a pinch keeps zooming/panning the canvas.
+  bool _twoFingerGestureDecided = false;
+  bool _twoFingerScrollActive = false;
+  Offset _twoFingerStartFocalPoint = Offset.zero;
+  double _twoFingerScrollIntegral = 0;
+  static const double _twoFingerPinchScaleThreshold = 0.08;
+  static const double _twoFingerScrollMoveThreshold = 8.0;
+  // Same sensitivity as the three-finger vertical scroll.
+  static const double _twoFingerScrollDivisor = 4.0;
+
   // Workaround tap down event when two fingers are used to scale(mobile)
   TapDownDetails? _lastTapDownDetails;
 
@@ -452,6 +463,10 @@ class _RawTouchGestureDetectorRegionState
     if (isNotTouchBasedDevice()) {
       return;
     }
+    _twoFingerGestureDecided = false;
+    _twoFingerScrollActive = false;
+    _twoFingerScrollIntegral = 0;
+    _twoFingerStartFocalPoint = d.localFocalPoint;
     if (isSpecialHoldDragActive) {
       // Initialize the last focal point to calculate deltas manually.
       _lastSpecialHoldDragFocalPoint = d.focalPoint;
@@ -469,6 +484,12 @@ class _RawTouchGestureDetectorRegionState
       final delta = d.focalPoint - _lastSpecialHoldDragFocalPoint;
       _lastSpecialHoldDragFocalPoint = d.focalPoint;
       await ffi.cursorModel.updatePan(delta * 2.0, d.focalPoint, handleTouch);
+      return;
+    }
+
+    // Mobile: a parallel two-finger swipe scrolls the remote wheel. It does
+    // not modify the canvas, so it stays available while the canvas is locked.
+    if (!isDesktop && !isWebDesktop && _handleTwoFingerScroll(d)) {
       return;
     }
 
@@ -514,6 +535,41 @@ class _RawTouchGestureDetectorRegionState
     if (!isSpecialHoldDragActive) {
       await inputModel.sendMouse('up', MouseButtons.left);
     }
+  }
+
+  // On mobile, a parallel two-finger swipe scrolls the remote wheel, while a
+  // pinch keeps zooming/panning the canvas. The first noticeable change locks
+  // the gesture into one of the two modes. Returns true when the update is
+  // handled as a wheel scroll so the caller skips the canvas updates.
+  bool _handleTwoFingerScroll(ScaleUpdateDetails d) {
+    if (widget.isCamera || ffi.ffiModel.isPeerAndroid) {
+      return false;
+    }
+    if (!_twoFingerGestureDecided) {
+      if ((d.scale - 1).abs() > _twoFingerPinchScaleThreshold) {
+        _twoFingerGestureDecided = true; // pinch -> canvas zoom/pan
+        return false;
+      }
+      final moved = (d.localFocalPoint - _twoFingerStartFocalPoint).distance;
+      if (moved > _twoFingerScrollMoveThreshold) {
+        _twoFingerGestureDecided = true;
+        _twoFingerScrollActive = true;
+      } else {
+        return false;
+      }
+    }
+    if (!_twoFingerScrollActive) {
+      return false;
+    }
+    _twoFingerScrollIntegral += d.focalPointDelta.dy / _twoFingerScrollDivisor;
+    if (_twoFingerScrollIntegral > 1) {
+      inputModel.scroll(1);
+      _twoFingerScrollIntegral = 0;
+    } else if (_twoFingerScrollIntegral < -1) {
+      inputModel.scroll(-1);
+      _twoFingerScrollIntegral = 0;
+    }
+    return true;
   }
 
   get onHoldDragCancel => null;
