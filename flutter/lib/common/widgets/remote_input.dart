@@ -93,27 +93,18 @@ class _RawTouchGestureDetectorRegionState
   double _mouseScrollIntegral = 0; // mouse scroll speed controller
   double _scale = 1;
 
-  // Mobile two-finger gesture: a parallel swipe scrolls the remote wheel,
-  // a pinch keeps zooming/panning the canvas.
-  bool _twoFingerGestureDecided = false;
-  bool _twoFingerScrollActive = false;
+  // Mobile two-finger gesture: scrolls the remote wheel (both axes); the
+  // canvas zoom moved to the three-finger gesture.
   int _twoFingerUpdateCount = 0;
-  int _twoFingerPostSettleFrames = 0;
-  double _twoFingerSpanScore = 0;
-  double _twoFingerMoveScore = 0;
-  double _twoFingerLastScale = 1;
   Offset _twoFingerScrollRemainder = Offset.zero;
   // Ignore the first updates: fingers land asynchronously and the early
-  // scale jitter can fake a pinch.
-  static const int _twoFingerSettleUpdates = 5;
-  // Classification compares the accumulated span change (converted to an
-  // approximate pixel distance with an assumed two-finger span) against the
-  // accumulated focal point movement.
-  static const double _twoFingerSpanPx = 250.0;
-  static const double _twoFingerMinEvidence = 12.0;
-  static const double _twoFingerPinchDominance = 2.0;
+  // deltas are jittery.
+  static const int _twoFingerSettleUpdates = 3;
   // Same sensitivity as the three-finger vertical scroll.
   static const double _twoFingerScrollDivisor = 4.0;
+  // Mobile three-finger gesture: canvas zoom + pan.
+  int _threeFingerPointerCount = 0;
+  double _threeFingerScale = 1;
 
   // Workaround tap down event when two fingers are used to scale(mobile)
   TapDownDetails? _lastTapDownDetails;
@@ -474,13 +465,7 @@ class _RawTouchGestureDetectorRegionState
     if (isNotTouchBasedDevice()) {
       return;
     }
-    _twoFingerGestureDecided = false;
-    _twoFingerScrollActive = false;
     _twoFingerUpdateCount = 0;
-    _twoFingerPostSettleFrames = 0;
-    _twoFingerSpanScore = 0;
-    _twoFingerMoveScore = 0;
-    _twoFingerLastScale = 1;
     _twoFingerScrollRemainder = Offset.zero;
     if (isSpecialHoldDragActive) {
       // Initialize the last focal point to calculate deltas manually.
@@ -552,44 +537,17 @@ class _RawTouchGestureDetectorRegionState
     }
   }
 
-  // On mobile, a parallel two-finger swipe scrolls the remote wheel, while a
-  // pinch keeps zooming/panning the canvas. Updates are ignored until the
-  // fingers settle; the gesture is then classified by comparing the
-  // accumulated span change against the accumulated focal movement, and the
-  // result stays locked. The canvas is kept still until then. Returns true
-  // when the update is consumed (scroll, or still undecided) so the caller
-  // skips the canvas updates.
+  // On mobile, a two-finger gesture only scrolls the remote wheel along the
+  // dominant axis; the canvas zoom moved to the three-finger gesture, so no
+  // classification is needed. Returns false for camera sessions and Android
+  // peers so the caller keeps the canvas behavior there.
   bool _handleTwoFingerScroll(ScaleUpdateDetails d) {
     if (widget.isCamera || ffi.ffiModel.isPeerAndroid) {
       return false;
     }
-    final incScale = d.scale / _twoFingerLastScale;
-    _twoFingerLastScale = d.scale;
     _twoFingerUpdateCount++;
-    if (!_twoFingerGestureDecided) {
-      if (_twoFingerUpdateCount <= _twoFingerSettleUpdates) {
-        return true; // fingers still landing
-      }
-      _twoFingerPostSettleFrames++;
-      _twoFingerSpanScore += (incScale - 1).abs();
-      _twoFingerMoveScore += d.focalPointDelta.distance;
-      final spanPx = _twoFingerSpanScore * _twoFingerSpanPx;
-      // A pinch must persist and clearly dominate the focal movement; a
-      // single noisy frame must not be enough to trigger the canvas zoom.
-      final isPinch = _twoFingerPostSettleFrames >= 2 &&
-          spanPx >= _twoFingerMinEvidence &&
-          spanPx > _twoFingerMoveScore * _twoFingerPinchDominance;
-      if (!isPinch && _twoFingerMoveScore < _twoFingerMinEvidence) {
-        return true; // not enough evidence yet: keep the canvas still
-      }
-      _twoFingerGestureDecided = true;
-      if (isPinch) {
-        return false; // pinch -> canvas zoom/pan
-      }
-      _twoFingerScrollActive = true;
-    }
-    if (!_twoFingerScrollActive) {
-      return false;
+    if (_twoFingerUpdateCount <= _twoFingerSettleUpdates) {
+      return true; // fingers still landing
     }
     _twoFingerScrollRemainder += d.focalPointDelta;
     final dx = _twoFingerScrollRemainder.dx;
@@ -608,18 +566,41 @@ class _RawTouchGestureDetectorRegionState
     return true;
   }
 
+  // Zoom/pan the canvas from the mobile three-finger gesture. The scale
+  // reference is re-primed whenever the pointer count changes or the scale
+  // jumps, so finger-count transitions do not apply stale scale at once.
+  void _handleThreeFingerZoom(ScaleUpdateDetails d) {
+    if (canvasLocked) return;
+    final ratio = d.scale / _threeFingerScale;
+    if (d.pointerCount != _threeFingerPointerCount || (ratio - 1).abs() > 0.25) {
+      _threeFingerPointerCount = d.pointerCount;
+      _threeFingerScale = d.scale;
+      return;
+    }
+    _threeFingerScale = d.scale;
+    ffi.canvasModel.updateScale(ratio, d.focalPoint);
+    ffi.canvasModel.panX(d.focalPointDelta.dx);
+    ffi.canvasModel.panY(d.focalPointDelta.dy);
+  }
+
   get onHoldDragCancel => null;
-  get onThreeFingerVerticalDragUpdate => ffi.ffiModel.isPeerAndroid
+  // Mobile: three fingers zoom/pan the canvas; the wheel scroll moved to the
+  // two-finger gesture. Desktop touch screens keep the three-finger wheel.
+  get onThreeFingerScaleUpdate => ffi.ffiModel.isPeerAndroid
       ? null
-      : (d) {
-          _mouseScrollIntegral += d.delta.dy / 4;
-          if (_mouseScrollIntegral > 1) {
-            inputModel.scroll(1);
-            _mouseScrollIntegral = 0;
-          } else if (_mouseScrollIntegral < -1) {
-            inputModel.scroll(-1);
-            _mouseScrollIntegral = 0;
+      : (ScaleUpdateDetails d) {
+          if (isDesktop || isWebDesktop) {
+            _mouseScrollIntegral += d.focalPointDelta.dy / 4;
+            if (_mouseScrollIntegral > 1) {
+              inputModel.scroll(1);
+              _mouseScrollIntegral = 0;
+            } else if (_mouseScrollIntegral < -1) {
+              inputModel.scroll(-1);
+              _mouseScrollIntegral = 0;
+            }
+            return;
           }
+          _handleThreeFingerZoom(d);
         };
 
   makeGestures(BuildContext context) {
@@ -677,7 +658,8 @@ class _RawTouchGestureDetectorRegionState
           ..onTwoFingerScaleStart = onTwoFingerScaleStart
           ..onTwoFingerScaleUpdate = onTwoFingerScaleUpdate
           ..onTwoFingerScaleEnd = onTwoFingerScaleEnd
-          ..onThreeFingerVerticalDragUpdate = onThreeFingerVerticalDragUpdate;
+          ..onThreeFingerScaleUpdate = onThreeFingerScaleUpdate
+          ..onThreeFingerVerticalDragEnd = (_) => _threeFingerPointerCount = 0;
       }),
     };
   }

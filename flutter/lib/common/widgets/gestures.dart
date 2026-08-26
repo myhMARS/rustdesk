@@ -36,6 +36,9 @@ class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
   GestureDragStartCallback? onThreeFingerVerticalDragStart;
   GestureDragUpdateCallback? onThreeFingerVerticalDragUpdate;
   GestureDragEndCallback? onThreeFingerVerticalDragEnd;
+  // Raw scale updates for the three-finger gesture (the drag callbacks above
+  // drop the scale information). Used for canvas zoom on mobile.
+  GestureScaleUpdateCallback? onThreeFingerScaleUpdate;
 
   var _currentState = GestureState.none;
   Timer? _debounceTimer;
@@ -72,7 +75,9 @@ class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
             }
             break;
           case GestureState.threeFingerVerticalDrag:
-            if (onThreeFingerVerticalDragUpdate != null) {
+            if (onThreeFingerScaleUpdate != null) {
+              onThreeFingerScaleUpdate!(d);
+            } else if (onThreeFingerVerticalDragUpdate != null) {
               onThreeFingerVerticalDragUpdate!(_getDragUpdateDetails(d));
             }
             break;
