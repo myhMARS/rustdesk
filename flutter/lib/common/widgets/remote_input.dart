@@ -99,8 +99,12 @@ class _RawTouchGestureDetectorRegionState
   bool _twoFingerScrollActive = false;
   Offset _twoFingerStartFocalPoint = Offset.zero;
   double _twoFingerScrollIntegral = 0;
-  static const double _twoFingerPinchScaleThreshold = 0.08;
-  static const double _twoFingerScrollMoveThreshold = 8.0;
+  int _twoFingerUpdateCount = 0;
+  // Ignore the first updates: fingers land asynchronously and the early
+  // scale jitter can fake a pinch.
+  static const int _twoFingerSettleUpdates = 3;
+  static const double _twoFingerPinchScaleThreshold = 0.12;
+  static const double _twoFingerScrollMoveThreshold = 24.0;
   // Same sensitivity as the three-finger vertical scroll.
   static const double _twoFingerScrollDivisor = 4.0;
 
@@ -466,6 +470,7 @@ class _RawTouchGestureDetectorRegionState
     _twoFingerGestureDecided = false;
     _twoFingerScrollActive = false;
     _twoFingerScrollIntegral = 0;
+    _twoFingerUpdateCount = 0;
     _twoFingerStartFocalPoint = d.localFocalPoint;
     if (isSpecialHoldDragActive) {
       // Initialize the last focal point to calculate deltas manually.
@@ -538,14 +543,20 @@ class _RawTouchGestureDetectorRegionState
   }
 
   // On mobile, a parallel two-finger swipe scrolls the remote wheel, while a
-  // pinch keeps zooming/panning the canvas. The first noticeable change locks
-  // the gesture into one of the two modes. Returns true when the update is
-  // handled as a wheel scroll so the caller skips the canvas updates.
+  // pinch keeps zooming/panning the canvas. Updates are ignored until the
+  // fingers settle, then the first unambiguous change locks the gesture into
+  // one of the two modes; the canvas stays still until then. Returns true
+  // when the update is consumed (scroll, or still undecided) so the caller
+  // skips the canvas updates.
   bool _handleTwoFingerScroll(ScaleUpdateDetails d) {
     if (widget.isCamera || ffi.ffiModel.isPeerAndroid) {
       return false;
     }
+    _twoFingerUpdateCount++;
     if (!_twoFingerGestureDecided) {
+      if (_twoFingerUpdateCount <= _twoFingerSettleUpdates) {
+        return true;
+      }
       if ((d.scale - 1).abs() > _twoFingerPinchScaleThreshold) {
         _twoFingerGestureDecided = true; // pinch -> canvas zoom/pan
         return false;
@@ -555,7 +566,7 @@ class _RawTouchGestureDetectorRegionState
         _twoFingerGestureDecided = true;
         _twoFingerScrollActive = true;
       } else {
-        return false;
+        return true; // undecided: keep the canvas still
       }
     }
     if (!_twoFingerScrollActive) {
