@@ -15,7 +15,7 @@ object FFI {
     external fun init(ctx: Context)
     external fun onAppStart(ctx: Context)
     external fun setClipboardManager(clipboardManager: RdClipboardManager)
-    external fun startServer(app_dir: String, custom_client_config: String)
+    external fun startServer(app_dir: String, home_dir: String, custom_client_config: String)
     external fun startService()
     external fun onVideoFrameUpdate(buf: ByteBuffer)
     external fun onAudioFrameUpdate(buf: ByteBuffer)
@@ -28,4 +28,6 @@ object FFI {
     external fun getBuildinOption(key: String): String
     external fun onClipboardUpdate(clips: ByteBuffer)
     external fun isServiceClipboardEnabled(): Boolean
+    external fun setDocumentLogsEnabled(enabled: Boolean)
+    external fun setInputServiceOpen(open: Boolean)
 }
